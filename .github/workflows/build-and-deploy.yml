@@ -1,0 +1,171 @@
+name: Build & Deploy to DeployGate
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: 'Build message / release note'
+        required: false
+        default: 'New build'
+  push:
+    branches: [main]
+    paths:
+      - '.github/build-trigger'
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Resolve build message
+        id: build_info
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            MSG=$(grep '^message=' .github/build-trigger | cut -d'=' -f2- || echo "New build")
+          else
+            MSG="${{ github.event.inputs.message }}"
+          fi
+          echo "message=$MSG" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Set up Android SDK path
+        run: echo "sdk.dir=$ANDROID_SDK_ROOT" >> local.properties
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Clean up old DeployGate binaries
+        env:
+          DEPLOYGATE_API_TOKEN: ${{ secrets.DEPLOYGATE_API_TOKEN }}
+        run: |
+          OWNER="project-oguon"
+          APP_ID="com.example.todoist"
+          BINARIES_URL="https://deploygate.com/api/users/$OWNER/platforms/android/apps/$APP_ID/binaries"
+
+          RESPONSE=$(curl -sS -H "Authorization: Token $DEPLOYGATE_API_TOKEN" "$BINARIES_URL")
+          REVISIONS=$(echo "$RESPONSE" | jq -r '.results.entries[] | select(.protected == false) | .revision')
+
+          if [ -z "$REVISIONS" ]; then
+            echo "No unprotected binaries to delete."
+          else
+            for REV in $REVISIONS; do
+              echo "Deleting revision $REV..."
+              curl -sS -X DELETE \
+                -H "Authorization: Token $DEPLOYGATE_API_TOKEN" \
+                "$BINARIES_URL/$REV"
+              echo
+            done
+          fi
+
+      - name: Build debug APK
+        run: ./gradlew :app:assembleDebug
+
+      - name: Upload APK to DeployGate
+        env:
+          DEPLOYGATE_API_TOKEN: ${{ secrets.DEPLOYGATE_API_TOKEN }}
+        run: |
+          OWNER="project-oguon"
+          MESSAGE="${{ steps.build_info.outputs.message }}"
+          APK_PATH=$(find app/build/outputs/apk/debug -maxdepth 1 -name "*.apk" | head -n1)
+
+          if [ -z "$APK_PATH" ] || [ ! -f "$APK_PATH" ]; then
+            echo "::error::No APK found under app/build/outputs/apk/debug"
+            exit 1
+          fi
+          echo "Uploading $APK_PATH"
+
+          RESPONSE=$(curl -sS \
+            -H "Authorization: Bearer $DEPLOYGATE_API_TOKEN" \
+            -X POST "https://deploygate.com/api/users/$OWNER/apps" \
+            -F "file=@$APK_PATH" \
+            --form-string "message=$MESSAGE")
+
+          echo "Upload response: $RESPONSE"
+
+          if ! echo "$RESPONSE" | jq -e '.error == false' > /dev/null; then
+            echo "::error::DeployGate upload failed: $RESPONSE"
+            exit 1
+          fi
+
+      - name: Create DeployGate distribution link
+        id: distribution
+        env:
+          DEPLOYGATE_API_TOKEN: ${{ secrets.DEPLOYGATE_API_TOKEN }}
+        run: |
+          OWNER="project-oguon"
+          APP_ID="com.example.todoist"
+          MESSAGE="${{ steps.build_info.outputs.message }}"
+          TITLE="AllVideoDownloader ($(date '+%Y/%m/%d %H:%M:%S'))"
+          API_BASE="https://deploygate.com/api/users/$OWNER/platforms/android/apps/$APP_ID/distributions"
+
+          create_distribution() {
+            curl -sS \
+              -H "Authorization: Bearer $DEPLOYGATE_API_TOKEN" \
+              -X POST "$API_BASE" \
+              --form-string "title=$TITLE" \
+              --form-string "release_note=$MESSAGE"
+          }
+
+          RESPONSE=$(create_distribution)
+          echo "Create response: $RESPONSE"
+
+          # If distribution limit reached, delete all existing and retry
+          if echo "$RESPONSE" | jq -e '.error' | grep -qi "limit"; then
+            echo "Distribution limit reached — deleting all existing distributions..."
+
+            LIST=$(curl -sS \
+              -H "Authorization: Bearer $DEPLOYGATE_API_TOKEN" \
+              "$API_BASE")
+
+            echo "$LIST" | jq -r '.results[].access_key' | while read -r KEY; do
+              echo "Deleting distribution: $KEY"
+              curl -sS -X DELETE \
+                -H "Authorization: Bearer $DEPLOYGATE_API_TOKEN" \
+                "https://deploygate.com/api/distributions/$KEY"
+            done
+
+            RESPONSE=$(create_distribution)
+            echo "Retry response: $RESPONSE"
+          fi
+
+          ACCESS_KEY=$(echo "$RESPONSE" | jq -r '.results.access_key // empty')
+          if [ -z "$ACCESS_KEY" ]; then
+            echo "::error::Failed to get access_key from DeployGate distribution response"
+            exit 1
+          fi
+
+          DIST_URL="https://deploygate.com/distributions/$ACCESS_KEY"
+          echo "distribution_url=$DIST_URL" >> "$GITHUB_OUTPUT"
+          echo "Distribution URL: $DIST_URL"
+
+      - name: Send Slack notification
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: |
+          MESSAGE="${{ steps.build_info.outputs.message }}"
+          DIST_URL="${{ steps.distribution.outputs.distribution_url }}"
+
+          PAYLOAD=$(jq -n \
+            --arg channel "UCATBN7RC" \
+            --arg text ":rocket: *New build ready!*\n*Message:* $MESSAGE\n*Download:* $DIST_URL" \
+            '{channel: $channel, text: $text}')
+
+          RESPONSE=$(curl -sS -X POST https://slack.com/api/chat.postMessage \
+            -H "Authorization: Bearer $SLACK_BOT_TOKEN" \
+            -H "Content-type: application/json; charset=utf-8" \
+            --data "$PAYLOAD")
+
+          echo "Slack response: $RESPONSE"
+
+          if ! echo "$RESPONSE" | jq -e '.ok' > /dev/null; then
+            echo "::warning::Slack notification may have failed: $RESPONSE"
+          fi
