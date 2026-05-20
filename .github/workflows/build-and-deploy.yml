@@ -104,7 +104,7 @@ jobs:
           OWNER="project-oguon"
           APP_ID="com.example.todoist"
           MESSAGE="${{ steps.build_info.outputs.message }}"
-          TITLE="AllVideoDownloader ($(date '+%Y/%m/%d %H:%M:%S'))"
+          TITLE="($(date '+%Y/%m/%d %H:%M:%S'))"
           API_BASE="https://deploygate.com/api/users/$OWNER/platforms/android/apps/$APP_ID/distributions"
 
           create_distribution() {
