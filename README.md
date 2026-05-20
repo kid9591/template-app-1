@@ -10,7 +10,7 @@ A **template Android project** structured as a simple Todo app. It is meant to b
 - **Task list (Home screen):** load all tasks from local storage, display them with filter chips (`ALL`, `TODO`, `IN_PROGRESS`, `DONE`), and show derived counts/progress. Tapping a task opens its detail screen.
 - **Create task (Add Task screen):** the user enters a title, picks a `TaskCategory`, optionally sets a due date and a time, and saves. The new task is persisted locally (Room) with a generated UUID.
 - **Task detail (Task Detail screen):** view a task by id, update its status/fields, or delete it.
-- **Sync:** on app launch (`HomeViewModel.init`) the repository pulls tasks from a remote endpoint (`GET /tasks`) via Ktor and **replaces** the local Room dataset. The UI always reads from Room's `Flow`, so network failures are silent — the cached data stays visible.
+- **Sync:** on app launch (`HomeViewModel.init`) the repository pulls tasks from a remote endpoint (`GET /tasks`) via Retrofit and **replaces** the local Room dataset. The UI always reads from Room's `Flow`, so network failures are silent — the cached data stays visible.
 
 ---
 
@@ -21,19 +21,20 @@ A **template Android project** structured as a simple Todo app. It is meant to b
 | Language | Kotlin |
 | UI | Jetpack Compose + Material 3 |
 | Architecture | MVI (State / Action / Event) |
-| DI | Koin (`koin-android`, `koin-androidx-compose`) |
+| DI | Hilt (`hilt-android`, `hilt-navigation-compose`) |
 | Navigation | `androidx.navigation.compose` with type-safe `@Serializable` routes |
-| Local DB | Room (v2) |
+| Local DB | Room |
 | Key-value store | Jetpack DataStore (Preferences) |
-| Networking | Ktor client (Android engine) + `kotlinx.serialization` |
+| Networking | Retrofit + OkHttp |
+| Serialization | Moshi (JSON / DTOs), kotlinx.serialization (navigation routes only) |
+| Image loading | Glide (GIF support built-in) |
 | Async | Kotlin Coroutines + Flow |
-| Testing | JUnit 5 (Jupiter), Turbine, AssertK, `kotlinx-coroutines-test` |
 
 ---
 
 ### Navigation
 
-Type-safe routes via `kotlinx.serialization`:
+Type-safe routes via `kotlinx.serialization` (required by the Navigation Compose API):
 
 ```kotlin
 @Serializable object HomeRoute
@@ -45,12 +46,12 @@ Flow: `Home → AddTask` and `Home → TaskDetail(taskId)`. Start destination is
 
 ### MVI conventions (per feature folder)
 
-Each `presentation/{feature}/` folder contains exactly three files:
+Each `screens/{feature}/` folder contains exactly three files:
 
 1. **`{Feature}State.kt`** — `data class State`, `sealed interface Action`, `sealed interface Event`. Derived values (counts, filtered lists, progress) live as computed properties on `State`, not in the ViewModel.
-2. **`{Feature}ViewModel.kt`** — consumes a repository, exposes `uiState: StateFlow<State>` and `events: Flow<Event>`. Events use a `Channel` exposed via `receiveAsFlow()` (not `SharedFlow`).
+2. **`{Feature}ViewModel.kt`** — annotated with `@HiltViewModel`, consumes a repository via `@Inject constructor`, exposes `uiState: StateFlow<State>` and `events: Flow<Event>`. Events use a `Channel` exposed via `receiveAsFlow()` (not `SharedFlow`).
 3. **`{Feature}Screen.kt`** — two composables:
-   - `{Feature}ScreenRoot` injects the ViewModel with `koinViewModel()`, observes events via `ObserveAsEvents`, and forwards actions.
+   - `{Feature}ScreenRoot` injects the ViewModel with `hiltViewModel()`, observes events via `ObserveAsEvents`, and forwards actions.
    - `{Feature}Screen` is pure UI: takes `state` + lambda callbacks, no DI.
 
 ---
@@ -72,103 +73,52 @@ interface TaskRepository {
 }
 ```
 
-The `domain` layer knows nothing about Room, Ktor, or Android. ViewModels depend on this interface only.
+The `domain` layer knows nothing about Room, Retrofit, or Android. ViewModels depend on this interface only.
 
 ### 3.2 Two sample implementations
 
-- **`OfflineFirstTaskRepository`** (production) — composes a `RoomTaskDataSource` (local) and a `KtorTaskDataSource` (remote). Reads always come from Room (`local.observeTasks()`); `sync()` fetches from the network and does a full replace into Room. Network errors are logged and swallowed so cached data continues to serve the UI.
-- **`FakeTaskRepository`** (testing / previews) — in-memory `MutableStateFlow<List<Task>>` seeded with sample data. Used by JUnit tests and can be used in `@Preview` composables.
+- **`OfflineFirstTaskRepository`** (production) — composes a `RoomTaskSource` (cache) and a `RetrofitTaskSource` (remote). Reads always come from Room (`local.observeTasks()`); `sync()` fetches from the network and does a full replace into Room. Network errors are logged and swallowed so cached data continues to serve the UI.
+- **`FakeTaskRepository`** (previews) — in-memory `MutableStateFlow<List<Task>>` seeded with sample data. Can be used in `@Preview` composables.
 
 ### 3.3 Data sources
 
 - **Cache**
-  - **Room** — structured / relational data. File: `data/local/room/RoomTaskDataSource.kt` (wraps `TaskDao`, exposes `Flow<List<Task>>`). `AppDatabase` is built in `databaseModule` with `fallbackToDestructiveMigration()` — replace with real migrations before shipping. Use this for entities with multiple fields, queries, or relations (tasks, messages, products…).
-  - **DataStore** — key-value data. File: `data/local/datastore/DataStoreKeyValueDataSource.kt`, implementing the generic `KeyValueRepository` (string / int / boolean / long get / put / observe). Use this for flat values: onboarding flags, user preferences, auth tokens, last-sync timestamps.
+  - **Room** — structured / relational data. File: `data/cache/room/RoomTaskSource.kt` (wraps `TaskDao`, exposes `Flow<List<Task>>`). `ApplicationDatabase` is built in `DatabaseModule` with `fallbackToDestructiveMigration()` — replace with real migrations before shipping. Use this for entities with multiple fields, queries, or relations (tasks, messages, products…).
+  - **DataStore** — key-value data. File: `data/cache/datastore/DataStoreSource.kt`, implementing the generic `SimpleKVRepository` (string / int / boolean / long get / put / observe). Use this for flat values: onboarding flags, user preferences, auth tokens, last-sync timestamps.
 
 - **Network**
-  - **Ktor** — HTTP client. Files: `data/remote/HttpClientFactory.kt` (Android engine, `ContentNegotiation`, logging) and `data/remote/KtorTaskDataSource.kt` (calls `GET /tasks`, returns `NetworkResult<List<TaskDto>>`). Add new endpoints as methods on a feature-scoped `*DataSource` that takes the shared `HttpClient` via Koin.
+  - **Retrofit + OkHttp** — HTTP client. Files: `data/remote/TaskApiService.kt` (Retrofit interface with suspend functions) and `data/remote/RetrofitTaskSource.kt` (calls `GET /tasks`, returns `NetworkResponse<List<TaskDto>>`). Add new endpoints as methods on a feature-scoped `TaskApiService` and wrap them in a `*Source` class injected via Hilt.
 
 ### 3.4 Mappers & Models
 
 - **Domain**
-  - name simple `Task` -> used for UI
-- **Cache** 
-   - **Model**: ends with `Entity` (eg: `TaskEntity`)
-   - **Mappers**: ends with `toEntity()` and `toDomain`, write mapper extensions in model file directly: `Task.toEntity()` / `TaskEntity.toDomain()`
+  - Named simply `Task` — used for UI
+- **Cache**
+  - **Model**: ends with `Entity` (e.g. `TaskEntity`)
+  - **Mappers**: `toEntity()` and `toDomain()`, written as extension functions in the model file directly
 - **Remote**
-   - **Model**: ends with `Dto` (Data transfer object)
-   - **Mappers**: ends with `toDto()` and `toDomain`, write mapper extensions in model file directly: `Task.toDto()` / `TaskDto.toDomain()`
+  - **Model**: ends with `Dto` (e.g. `TaskDto`), annotated with `@JsonClass(generateAdapter = true)`
+  - **Mappers**: `toDto()` and `toDomain()`, written as extension functions in the model file directly
 
-### 3.5 DI wiring (`di/AppModule.kt`)
+### 3.5 DI wiring (Hilt modules in `di/`)
 
-Five modules, assembled into `appModule` and passed to `startKoin` in `TodoApp`:
+Four Hilt modules, each installed in `SingletonComponent`:
 
-```kotlin
-val appModule = listOf(networkModule, databaseModule, dataModule, datastoreModule, viewModelModule)
-```
+- **`NetworkModule`** — `OkHttpClient`, `Moshi`, `Retrofit`, `TaskApiService`
+- **`DatabaseModule`** — `ApplicationDatabase`, `TaskDao`
+- **`DataStoreModule`** — `DataStore<Preferences>`
+- **`RepositoryModule`** — `@Binds` `TaskRepository → OfflineFirstTaskRepository`, `SimpleKVRepository → DataStoreSource`
 
-- `networkModule` — `HttpClient`, `KtorTaskDataSource`
-- `databaseModule` — `AppDatabase`, `TaskDao`, `RoomTaskDataSource`
-- `dataModule` — binds `TaskRepository` to `OfflineFirstTaskRepository`
-- `datastoreModule` — `DataStore<Preferences>`, binds `KeyValueRepository` to `DataStoreKeyValueDataSource`
-- `viewModelModule` — `viewModel { ... }` for every ViewModel
+`TodoApp` is annotated with `@HiltAndroidApp`. `MainActivity` is annotated with `@AndroidEntryPoint`. ViewModels use `@HiltViewModel` + `@Inject constructor`.
 
 ---
 
-## 4. Testing
-
-Tests live under `app/src/test/` (JVM only; the `androidTest/` directory contains Compose UI tests but the CI baseline targets JVM unit tests).
-
-### Stack
-
-- **JUnit 5 (Jupiter)** — `@Test`, `@BeforeEach`, `@AfterEach`
-- **Turbine** — `flow.test { awaitItem(); cancelAndIgnoreRemainingEvents() }`
-- **AssertK** — `assertThat(actual).isEqualTo(expected)`
-- **kotlinx-coroutines-test** — `runTest`, `UnconfinedTestDispatcher`, `Dispatchers.setMain` / `resetMain`
-- **No mocking framework** — use `FakeTaskRepository` (hand-written) instead of Mockito/MockK.
-
-### Sample test files
-
-- `HomeViewModelTest.kt` — initial state, action → state transitions, action → one-shot event.
-- `AddTaskViewModelTest.kt` — form validation, save action, navigation event.
-- `TaskDetailViewModelTest.kt` — loading a task by id, update / delete flows.
-- `FakeTaskRepositoryTest.kt` — sanity tests for the fake itself, so test failures aren't hidden behind a buggy fake.
-
-### Template for a new ViewModel test
-
-```kotlin
-@OptIn(ExperimentalCoroutinesApi::class)
-class FooViewModelTest {
-    private val testDispatcher = UnconfinedTestDispatcher()
-    private lateinit var repository: FakeTaskRepository
-    private lateinit var viewModel: FooViewModel
-
-    @BeforeEach fun setup() {
-        Dispatchers.setMain(testDispatcher)
-        repository = FakeTaskRepository()
-        viewModel = FooViewModel(repository)
-    }
-
-    @AfterEach fun tearDown() = Dispatchers.resetMain()
-
-    @Test fun `action X emits event Y`() = runTest {
-        viewModel.events.test {
-            viewModel.onAction(FooAction.X)
-            assertThat(awaitItem() is FooEvent.Y).isTrue()
-            cancelAndIgnoreRemainingEvents()
-        }
-    }
-}
-```
-
----
-
-## 5. Using this template for a new app
+## 4. Using this template for a new app
 
 1. Rename the package root (`com.example.todoist` → your namespace) and the `applicationId` in `app/build.gradle.kts`.
 2. Replace the `Task` domain model (and `TaskCategory` / `TaskStatus`) with your own entities. Keep `domain/` framework-free.
-3. Update `TaskRepository` → `YourEntityRepository`, the Room entity/DAO, the Ktor endpoint, and the DTOs accordingly.
-4. Rebuild Koin modules in `di/AppModule.kt` to bind the new repository and ViewModels.
+3. Update `TaskRepository` → `YourEntityRepository`, the Room entity/DAO, the Retrofit API service, and the DTOs accordingly.
+4. Add a new Hilt module (or extend the existing ones) to bind the new repository and data sources.
 5. Replace the three feature folders (`home`, `addtask`, `taskdetail`) with your own screens, following the State / ViewModel / Screen + Root split.
-6. Update `AppNavigation.kt` routes and start destination.
-7. Before shipping, replace `fallbackToDestructiveMigration()` in `databaseModule` with real Room migrations.
+6. Update `ApplicationNavigationGraph.kt` routes and start destination.
+7. Before shipping, replace `fallbackToDestructiveMigration()` in `DatabaseModule` with real Room migrations.

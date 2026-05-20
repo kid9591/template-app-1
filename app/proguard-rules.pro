@@ -1,8 +1,6 @@
 # Add project specific ProGuard rules here.
 
-# ---------- kotlinx.serialization ----------
-# Keep generated serializer companion objects and the @Serializable classes
-# in packages that contain serializable models (DTOs and navigation routes).
+# ---------- kotlinx.serialization (navigation routes only) ----------
 -keepattributes *Annotation*, InnerClasses
 -dontnote kotlinx.serialization.AnnotationsKt
 
@@ -10,26 +8,46 @@
     <fields>;
     <methods>;
 }
--keepclassmembers class com.example.todoist.data.remote.dto.** {
+-keepclassmembers class com.example.todoist.screens.navigation.** {
     *** Companion;
 }
--keepclasseswithmembers class com.example.todoist.data.remote.dto.** {
+-keepclasseswithmembers class com.example.todoist.screens.navigation.** {
     kotlinx.serialization.KSerializer serializer(...);
 }
--keep,includedescriptorclasses class com.example.todoist.data.remote.dto.**$$serializer { *; }
+-keep,includedescriptorclasses class com.example.todoist.screens.navigation.**$$serializer { *; }
 
--keepclassmembers class com.example.todoist.presentation.navigation.** {
-    *** Companion;
+# ---------- Moshi ----------
+-keepclasseswithmembers class * {
+    @com.squareup.moshi.* <fields>;
+    @com.squareup.moshi.* <methods>;
 }
--keepclasseswithmembers class com.example.todoist.presentation.navigation.** {
-    kotlinx.serialization.KSerializer serializer(...);
-}
--keep,includedescriptorclasses class com.example.todoist.presentation.navigation.**$$serializer { *; }
+-keep @com.squareup.moshi.JsonClass class * { *; }
+-keep class com.example.todoist.data.remote.dto.** { *; }
+-keepnames @com.squareup.moshi.JsonClass class *
 
-# ---------- Ktor ----------
--dontwarn io.ktor.**
--dontwarn org.slf4j.**
--keep class io.ktor.client.engine.android.** { *; }
+# ---------- Retrofit ----------
+-dontwarn retrofit2.**
+-keep class retrofit2.** { *; }
+-keepattributes Signature
+-keepattributes Exceptions
+
+# ---------- OkHttp ----------
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-keep class okhttp3.** { *; }
+-keep interface okhttp3.** { *; }
+
+# ---------- Hilt ----------
+-dontwarn dagger.hilt.**
+-keep class dagger.hilt.** { *; }
+-keep @dagger.hilt.android.HiltAndroidApp class * { *; }
+-keep @dagger.hilt.android.AndroidEntryPoint class * { *; }
+-keep @dagger.hilt.android.lifecycle.HiltViewModel class * { *; }
+
+# ---------- Glide ----------
+-keep public class * implements com.bumptech.glide.module.GlideModule
+-keep class com.bumptech.glide.** { *; }
+-dontwarn com.bumptech.glide.**
 
 # ---------- Room ----------
 -keep class androidx.room.** { *; }
@@ -39,9 +57,6 @@
 -keepclassmembers class * {
     @androidx.room.* <methods>;
 }
-
-# ---------- Koin ----------
--dontwarn org.koin.**
 
 # ---------- Coroutines ----------
 -keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}

@@ -3,16 +3,17 @@ package com.example.todoist.data.remote.dto
 import com.example.todoist.domain.model.Task
 import com.example.todoist.domain.model.TaskCategory
 import com.example.todoist.domain.model.TaskStatus
-import kotlinx.serialization.Serializable
+import com.squareup.moshi.Json
+import com.squareup.moshi.JsonClass
 import java.time.LocalDate
 
-@Serializable
+@JsonClass(generateAdapter = true)
 data class TaskDto(
     val id: String,
     val title: String,
     val status: String,
     val category: String,
-    val dueDate: String? = null,
+    @Json(name = "dueDate") val dueDate: String? = null,
     val time: String? = null,
 )
 
